@@ -1,0 +1,247 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type { Plugin } from "@opencode/plugin";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import OrchestratorPlugin from "../../src/index.js";
+
+describe("OpenCode 2 plugin setup", () => {
+    const directories: string[] = [];
+
+    afterEach(() => {
+        for (const directory of directories.splice(0)) {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("registers native V2 agents, tools, commands, hooks, and cleanup", async () => {
+        const directory = mkdtempSync(path.join(tmpdir(), "oco-v2-test-"));
+        directories.push(directory);
+        const registrations: Array<{ dispose: ReturnType<typeof vi.fn> }> = [];
+        type Permission = { action: string; resource: string; effect: string };
+        const agents = new Map<string, { id: string; description?: string; system?: string; mode: string; hidden: boolean; permissions: Permission[] }>();
+        const tools: Array<{ name?: string; options?: unknown }> = [];
+        const commands: Array<{ name?: string }> = [];
+        const hookNames: string[] = [];
+        const registration = () => {
+            const value = { dispose: vi.fn().mockResolvedValue(undefined) };
+            registrations.push(value);
+            return Promise.resolve(value);
+        };
+        const context = {
+            location: { directory, project: { directory } },
+            options: {},
+            agent: {
+                list: vi.fn().mockResolvedValue([]),
+                transform: vi.fn((callback: (editor: { update: (id: string, edit: (agent: NonNullable<ReturnType<typeof agents.get>>) => void) => void }) => void) => {
+                    callback({ update: (id, edit) => {
+                        const agent = agents.get(id) ?? { id, mode: "all", hidden: false, permissions: [{ action: "*", resource: "*", effect: "allow" }] };
+                        edit(agent);
+                        agents.set(id, agent);
+                    } });
+                    return registration();
+                }),
+            },
+            session: {
+                create: vi.fn(), prompt: vi.fn(), synthetic: vi.fn(), interrupt: vi.fn(), context: vi.fn(),
+                hook: vi.fn((name: string) => { hookNames.push(`session.${name}`); return registration(); }),
+            },
+            tool: {
+                transform: vi.fn((callback: (editor: { add: (tool: { name?: string; options?: unknown }) => void }) => void) => {
+                    callback({ add: tool => tools.push(tool) });
+                    return registration();
+                }),
+                hook: vi.fn((name: string) => { hookNames.push(`tool.${name}`); return registration(); }),
+            },
+            command: {
+                transform: vi.fn((callback: (editor: { add: (command: { name?: string }) => void }) => void) => {
+                    callback({ add: command => commands.push(command) });
+                    return registration();
+                }),
+            },
+            event: { subscribe: () => emptyEvents() },
+        } as unknown as Plugin.Context;
+
+        const cleanup = await OrchestratorPlugin.setup(context);
+
+        expect([...agents.keys()]).toEqual(["Commander", "Planner", "Worker", "Reviewer"]);
+        expect(agents.get("Commander")).toMatchObject({ mode: "primary", hidden: false, system: expect.any(String) });
+        expect(agents.get("Commander")?.system).toContain("You are Commander.");
+        expect(agents.get("Commander")?.system).toContain("historical context, not a new user request or approval");
+        for (const name of ["Planner", "Worker", "Reviewer"]) {
+            expect(agents.get(name)).toMatchObject({ mode: "subagent", hidden: true, system: expect.any(String) });
+            expect(agents.get(name)?.system).toContain(`You are ${name}.`);
+            // Terminal agents may not spawn subagents; the deny is appended so it wins over earlier allows.
+            expect(agents.get(name)?.permissions.at(-1)).toEqual({ action: "subagent", resource: "*", effect: "deny" });
+            expect(agents.get(name)?.permissions[0]).toEqual({ action: "*", resource: "*", effect: "allow" });
+        }
+        expect(agents.get("Commander")?.permissions).toEqual([{ action: "*", resource: "*", effect: "allow" }]);
+        // Delegation is OpenCode's native subagent tool: the plugin adds only update_todo.
+        expect(tools.map(tool => tool.name)).toEqual(["update_todo"]);
+        // OpenCode 2 hides tools without `codemode: false` behind the code-mode catalog.
+        expect(tools[0].options).toEqual({ codemode: false });
+        expect(commands.map(command => command.name)).toEqual(expect.arrayContaining([
+            "task", "plan", "agents", "stop", "cancel",
+        ]));
+        expect(hookNames).toEqual(expect.arrayContaining([
+            "session.prompt", "session.context", "session.compaction",
+            "tool.execute.before", "tool.execute.after",
+        ]));
+        expect(cleanup).toBeTypeOf("function");
+        await cleanup?.();
+        expect(registrations.every(item => item.dispose.mock.calls.length === 1)).toBe(true);
+    });
+
+    it("runs task as a synthetic instruction instead of a visible user prompt", async () => {
+        const directory = mkdtempSync(path.join(tmpdir(), "oco-v2-command-"));
+        directories.push(directory);
+        const commands: Array<{ name: string; execute: (input: unknown) => Promise<void> }> = [];
+        const context = {
+            session: { prompt: vi.fn(), synthetic: vi.fn().mockResolvedValue(undefined) },
+            command: { transform: vi.fn(async (edit: (editor: { add: (command: typeof commands[number]) => void }) => void) => {
+                edit({ add: command => commands.push(command) });
+                return { dispose: vi.fn() };
+            }) },
+        } as unknown as Plugin.Context;
+        const { registerCommands } = await import("../../src/host/command-adapter.js");
+        const handlerContext = { directory, sessions: new Map() } as unknown as Parameters<typeof registerCommands>[1];
+        await registerCommands(context, handlerContext);
+        await commands.find(command => command.name === "task")?.execute({ sessionID: "s1", prompt: { text: "do work" } });
+        expect(context.session.synthetic).toHaveBeenCalledWith(expect.objectContaining({ sessionID: "s1" }));
+        expect(context.session.prompt).not.toHaveBeenCalled();
+    });
+
+    it("replaces an active V2 mission after interrupting its owner", async () => {
+        const directory = mkdtempSync(path.join(tmpdir(), "oco-v2-replace-"));
+        directories.push(directory);
+        const commands: Array<{ name: string; execute: (input: unknown) => Promise<void> }> = [];
+        const session = {
+            synthetic: vi.fn().mockResolvedValue(undefined),
+            interrupt: vi.fn().mockResolvedValue({ interrupted: true }),
+        };
+        const context = {
+            session,
+            command: { transform: vi.fn(async (edit: (editor: { add: (command: typeof commands[number]) => void }) => void) => {
+                edit({ add: command => commands.push(command) });
+                return { dispose: vi.fn() };
+            }) },
+        } as unknown as Plugin.Context;
+        const { createHostClient } = await import("../../src/host/client.js");
+        const { registerCommands } = await import("../../src/host/command-adapter.js");
+        const { ChildSessions } = await import("../../src/core/session/child-sessions.js");
+        const bridge = createHostClient(context);
+        const children = new ChildSessions();
+        children.add("old-root", "busy-child");
+        children.add("old-root", "idle-child");
+        await registerCommands(context, { client: bridge.client, directory, sessions: new Map(), children } as never);
+        const task = commands.find(command => command.name === "task")!;
+        await task.execute({ sessionID: "old-root", prompt: { text: "Old mission" } });
+        bridge.statuses.set("old-root", "busy");
+        bridge.statuses.set("busy-child", "busy");
+        await task.execute({ sessionID: "new-root", prompt: { text: "New mission" } });
+        expect(session.interrupt).toHaveBeenCalledWith({ sessionID: "old-root", resume: false });
+        expect(session.interrupt).toHaveBeenCalledWith({ sessionID: "busy-child", resume: false });
+        expect(session.interrupt).not.toHaveBeenCalledWith(expect.objectContaining({ sessionID: "idle-child" }));
+        expect(session.synthetic).toHaveBeenLastCalledWith(expect.objectContaining({ sessionID: "new-root" }));
+    });
+
+    it("keeps the old mission when a busy delegated session cannot be stopped", async () => {
+        const directory = mkdtempSync(path.join(tmpdir(), "oco-v2-replace-fail-"));
+        directories.push(directory);
+        const commands: Array<{ name: string; execute: (input: unknown) => Promise<void> }> = [];
+        const session = {
+            synthetic: vi.fn().mockResolvedValue(undefined),
+            interrupt: vi.fn(async ({ sessionID }: { sessionID: string }) => ({ interrupted: sessionID !== "stuck-child" })),
+        };
+        const context = {
+            session,
+            command: { transform: vi.fn(async (edit: (editor: { add: (command: typeof commands[number]) => void }) => void) => {
+                edit({ add: command => commands.push(command) });
+                return { dispose: vi.fn() };
+            }) },
+        } as unknown as Plugin.Context;
+        const { createHostClient } = await import("../../src/host/client.js");
+        const { registerCommands } = await import("../../src/host/command-adapter.js");
+        const { ChildSessions } = await import("../../src/core/session/child-sessions.js");
+        const { readLoopState } = await import("../../src/core/loop/mission-loop.js");
+        const bridge = createHostClient(context);
+        const children = new ChildSessions();
+        children.add("old-root", "stuck-child");
+        await registerCommands(context, { client: bridge.client, directory, sessions: new Map(), children } as never);
+        const task = commands.find(command => command.name === "task")!;
+        await task.execute({ sessionID: "old-root", prompt: { text: "Old mission" } });
+        bridge.statuses.set("stuck-child", "busy");
+        await expect(task.execute({ sessionID: "new-root", prompt: { text: "New mission" } }))
+            .rejects.toThrow("Could not stop all delegated sessions of old-root; mission unchanged");
+        expect(readLoopState(directory)).toMatchObject({ active: true, sessionID: "old-root" });
+        expect(session.synthetic).not.toHaveBeenCalledWith(expect.objectContaining({ sessionID: "new-root" }));
+    });
+
+    it("applies configured temperature in the V2 generation context", async () => {
+        const directory = mkdtempSync(path.join(tmpdir(), "oco-v2-temperature-"));
+        directories.push(directory);
+        let contextHook: ((input: unknown) => Promise<void>) | undefined;
+        const registration = async () => ({ dispose: vi.fn() });
+        const context = {
+            location: { directory, project: { directory } },
+            options: { agentTemperatures: { Commander: 0.1 } },
+            agent: { list: vi.fn().mockResolvedValue([]), transform: registration },
+            session: { hook: vi.fn((name: string, callback: (input: unknown) => Promise<void>) => {
+                if (name === "context") contextHook = callback;
+                return registration();
+            }) },
+            tool: { hook: registration, transform: registration },
+            command: { transform: registration },
+            event: { subscribe: () => emptyEvents() },
+        } as unknown as Plugin.Context;
+        const cleanup = await OrchestratorPlugin.setup(context);
+        const request = { sessionID: "s1", agent: "Commander", model: { providerID: "p", id: "m" }, system: [], options: { temperature: 0.7 } };
+        await contextHook?.(request);
+        expect(request.options.temperature).toBe(0.1);
+        await cleanup?.();
+    });
+
+    it("passes the agent seen in the V2 context hook to later prompt hooks", async () => {
+        const directory = mkdtempSync(path.join(tmpdir(), "oco-v2-agent-"));
+        directories.push(directory);
+        const hooks = new Map<string, (input: unknown) => Promise<void>>();
+        const registration = async () => ({ dispose: vi.fn() });
+        const context = {
+            location: { directory, project: { directory } },
+            options: {},
+            agent: { list: vi.fn().mockResolvedValue([]), transform: registration },
+            session: { hook: vi.fn((name: string, callback: (input: unknown) => Promise<void>) => {
+                hooks.set(name, callback);
+                return registration();
+            }) },
+            tool: { hook: registration, transform: registration },
+            command: { transform: registration },
+            event: { subscribe: () => emptyEvents() },
+        } as unknown as Plugin.Context;
+        const { HookRegistry } = await import("../../src/hooks/registry.js");
+        const cleanup = await OrchestratorPlugin.setup(context);
+        const executeChat = vi.spyOn(HookRegistry.getInstance(), "executeChat");
+        const sessionID = "ses_v2_agent_memory";
+        try {
+            // /task creates the orchestrator session state the agent is remembered in.
+            await hooks.get("prompt")?.({ sessionID, prompt: { text: "/task Build the feature" } });
+            await hooks.get("context")?.({
+                sessionID, agent: "Commander", model: { providerID: "p", id: "m" }, system: [], options: {},
+            });
+            await hooks.get("prompt")?.({ sessionID, prompt: { text: "keep going" } });
+
+            expect(executeChat).toHaveBeenLastCalledWith(
+                expect.objectContaining({ sessionID, agent: "commander" }),
+                "keep going",
+            );
+        } finally {
+            executeChat.mockRestore();
+            await hooks.get("prompt")?.({ sessionID, prompt: { text: "/stop" } });
+            await cleanup?.();
+        }
+    });
+});
+
+async function* emptyEvents(): AsyncGenerator<never> {
+    return;
+}

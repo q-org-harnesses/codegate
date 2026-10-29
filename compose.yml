@@ -1,0 +1,74 @@
+services:
+  # Build the Linux x64 release binary when Cargo is unavailable on the host.
+  # Usage: docker compose run --rm dev
+  dev:
+    image: rust:1.98.1-bookworm
+    platform: linux/amd64
+    working_dir: /app
+    volumes:
+      - .:/app
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+    command: >
+      sh -c "
+        rustup target add x86_64-unknown-linux-gnu &&
+        cargo build --release --locked --target x86_64-unknown-linux-gnu &&
+        mkdir -p bin &&
+        cp target/x86_64-unknown-linux-gnu/release/orchestrator bin/orchestrator-linux-x64 &&
+        echo 'Rust build complete: bin/orchestrator-linux-x64'
+      "
+
+  # Build the Linux arm64 release binary.
+  # Usage: docker compose run --rm rust-arm64
+  rust-arm64:
+    image: rust:1.98.1-bookworm
+    platform: linux/amd64
+    working_dir: /app
+    volumes:
+      - .:/app
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+    command: >
+      sh -c "
+        rustup target add aarch64-unknown-linux-gnu &&
+        apt-get update -q && apt-get install -y -q gcc-aarch64-linux-gnu &&
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc &&
+        cargo build --release --locked --target aarch64-unknown-linux-gnu &&
+        mkdir -p bin &&
+        cp target/aarch64-unknown-linux-gnu/release/orchestrator bin/orchestrator-linux-arm64 &&
+        echo 'arm64 build complete: bin/orchestrator-linux-arm64'
+      "
+
+  # Cross-compile a Windows binary for local testing. This uses the MinGW
+  # (gnu) target; published releases are built with MSVC in release.yml.
+  # Usage: docker compose run --rm win-builder
+  win-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile.windows
+    volumes:
+      - .:/app
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+    command: >
+      sh -c "
+        cargo build --release --locked --target x86_64-pc-windows-gnu &&
+        mkdir -p bin &&
+        cp target/x86_64-pc-windows-gnu/release/orchestrator.exe bin/orchestrator-windows-x64.exe &&
+        echo 'Windows build complete: bin/orchestrator-windows-x64.exe'
+      "
+
+  # Run Rust tests with the same flags as CI and release preflight.
+  # Usage: docker compose run --rm test
+  test:
+    image: rust:1.98.1-bookworm
+    working_dir: /app
+    volumes:
+      - .:/app
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+    command: cargo test --locked --workspace --all-targets
+
+volumes:
+  cargo-cache:
+  target-cache:

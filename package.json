@@ -1,0 +1,86 @@
+{
+  "name": "opencode-orchestrator",
+  "description": "Mission continuity for OpenCode: an OpenCode 2 plugin that keeps a task and its unfinished work connected across turns until it is verified.",
+  "version": "2.0.21",
+  "author": "agnusdei1207",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agnusdei1207/opencode-orchestrator.git"
+  },
+  "homepage": "https://agnusdei1207.github.io/opencode-orchestrator/",
+  "bugs": {
+    "url": "https://github.com/agnusdei1207/opencode-orchestrator/issues"
+  },
+  "keywords": [
+    "opencode",
+    "ai",
+    "agent",
+    "orchestrator",
+    "llm",
+    "plugin"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "bin": {
+    "orchestrator": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE",
+    "opencode-orchestrator.schema.json"
+  ],
+  "scripts": {
+    "docker:build-all": "docker compose run --rm dev && docker compose run --rm rust-arm64 && docker compose run --rm win-builder",
+    "docker:build-win": "docker compose run --rm win-builder",
+    "docker:rust-dist": "docker compose run --rm dev && docker compose run --rm rust-arm64",
+    "docker:test": "docker compose run --rm test",
+    "docker:clean": "docker compose down -v",
+    "build": "node scripts/build.mjs",
+    "typecheck:test": "tsc -p tsconfig.test.json",
+    "gen:schema": "esbuild scripts/gen-schema.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/gen-schema.mjs && node node_modules/.cache/gen-schema.mjs",
+    "build:all": "npm run build && npm run docker:rust-dist",
+    "test": "vitest run --reporter=verbose",
+    "test:coverage": "vitest run --coverage",
+    "test:unit": "vitest run tests/unit --reporter=verbose",
+    "test:e2e": "vitest run tests/e2e --reporter=verbose",
+    "test:all": "npm run build && npm test",
+    "prepublishOnly": "npm run build",
+    "sync:readme-version": "node scripts/sync-readme-version.mjs",
+    "release:preflight": "node scripts/release-preflight.mjs",
+    "release:patch": "node scripts/release-version.mjs patch && npm run release:preflight && npm run release:push",
+    "release:minor": "node scripts/release-version.mjs minor && npm run release:preflight && npm run release:push",
+    "release:major": "node scripts/release-version.mjs major && npm run release:preflight && npm run release:push",
+    "release:dry-run": "node scripts/release-preflight.mjs --allow-dirty --skip-branch --skip-version-check",
+    "release:push": "node scripts/release-push.mjs",
+    "release:clean": "node -e \"for (const dir of ['dist', 'bin']) require('node:fs').rmSync(dir, { recursive: true, force: true })\" && docker compose down -v"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  },
+  "overrides": {
+    "zod": "$zod"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.22",
+    "@types/node": "24.13.6",
+    "@vitest/coverage-v8": "^5.0.1",
+    "es-module-lexer": "^3.0.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}

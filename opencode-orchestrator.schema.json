@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "customRendering": {
+      "default": true,
+      "description": "Append a timestamp/step/duration footer to tool results. Default true.",
+      "type": "boolean"
+    },
+    "agentTemperatures": {
+      "description": "Sampling temperature (0 to 2) per agent, keyed by exact agent name such as \"Worker\".",
+      "default": {},
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    },
+    "contextMaxTokens": {
+      "description": "Context window to assume for every model. Unset uses the limit the host reports.",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "missionLoop": {
+      "default": {
+        "ledger": true,
+        "markdownMemory": true,
+        "maxEvidenceEvents": 20
+      },
+      "description": "Mission ledger and markdown scratchpad settings.",
+      "type": "object",
+      "properties": {
+        "ledger": {
+          "default": true,
+          "type": "boolean"
+        },
+        "markdownMemory": {
+          "default": true,
+          "type": "boolean"
+        },
+        "maxEvidenceEvents": {
+          "default": 20,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  },
+  "additionalProperties": {}
+}

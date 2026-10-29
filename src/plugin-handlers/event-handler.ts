@@ -1,0 +1,354 @@
+/**
+ * Event Handler
+ * 
+ * Handles OpenCode session events:
+ * - session.created, session.deleted, session.error, session.idle
+ * - message.updated
+ */
+
+import * as SessionRecovery from "../core/recovery/session-recovery.js";
+import * as MissionLoopHandler from "../core/loop/mission-loop-handler.js";
+import { isLoopActive } from "../core/loop/mission-loop.js";
+import * as ContextMonitor from "../core/context/index.js";
+import * as SessionActivity from "../core/session/activity.js";
+import * as PendingInjection from "../core/session/pending-injection.js";
+import { SESSION_EVENTS, MESSAGE_EVENTS, MESSAGE_ROLES, SESSION_STATUS } from "../shared/index.js";
+import type { PluginHandlerContext, PluginSessionState } from "./context.js";
+import { handleCompletedAssistantMessage } from "./assistant-done-handler.js";
+import { HookRegistry } from "../hooks/registry.js";
+import { log } from "../shared/logger.js";
+import { isRecord } from "../shared/core/guards.js";
+
+export type EventHandlerContext = PluginHandlerContext;
+
+type PluginEvent = {
+    type: string;
+    properties?: Record<string, unknown>;
+};
+
+type EventInput = {
+    event: PluginEvent;
+};
+
+type MessageUpdatedInfo = {
+    id?: string;
+    sessionID?: string;
+    role?: string;
+    time?: { completed?: number };
+    providerID?: string;
+    modelID?: string;
+    tokens?: {
+        total?: number;
+        input?: number;
+        output?: number;
+        reasoning?: number;
+        cache?: { read?: number; write?: number };
+    };
+};
+
+const IDLE_CONTINUATION_DELAY_MS = 500;
+
+/**
+ * Create event handler for session events
+ */
+export function createEventHandler(ctx: EventHandlerContext) {
+    return async (input: EventInput) => {
+        await handlePluginEvent(ctx, input.event);
+    };
+}
+
+async function handlePluginEvent(ctx: EventHandlerContext, event: PluginEvent): Promise<void> {
+    switch (event.type) {
+        case SESSION_EVENTS.CREATED:
+            recordChildSession(ctx, event);
+            return;
+        case SESSION_EVENTS.COMPACTED: {
+            const sessionID = readSessionID(event.properties);
+            if (sessionID) MissionLoopHandler.handleSessionCompacted(sessionID);
+            return;
+        }
+        case SESSION_EVENTS.DELETED:
+            handleSessionDeleted(ctx, event);
+            return;
+        case SESSION_EVENTS.ERROR:
+            await handleSessionError(ctx, event);
+            return;
+        case MESSAGE_EVENTS.UPDATED:
+            await handleMessageUpdated(ctx, event);
+            return;
+        case SESSION_EVENTS.IDLE:
+            handleSessionIdle(ctx, event);
+            return;
+        case SESSION_EVENTS.STATUS:
+            handleSessionStatus(ctx, event);
+            return;
+    }
+}
+
+/** Native subagents run in child sessions; remember them so missions can wait for them. */
+function recordChildSession(ctx: EventHandlerContext, event: PluginEvent): void {
+    const parentID = readString(event.properties?.parentID);
+    if (parentID) ctx.children.add(parentID, readSessionID(event.properties));
+}
+
+function handleSessionDeleted(ctx: EventHandlerContext, event: PluginEvent): void {
+    const { sessions } = ctx;
+    const sessionID = readSessionID(event.properties);
+    SessionActivity.clearSessionActivity(sessionID);
+    PendingInjection.clearPrompts(sessionID);
+    // Context, recovery and loop state are recorded for every session, including
+    // delegated children this map never tracks, so release them unconditionally.
+    SessionRecovery.cleanupSessionRecovery(sessionID);
+    MissionLoopHandler.cleanupSession(sessionID);
+    ContextMonitor.cleanupSession(sessionID);
+    ctx.contextLimits.forgetSession(sessionID);
+    ctx.children.remove(sessionID);
+    HookRegistry.getInstance().clearSession(sessionID);
+
+    sessions.delete(sessionID);
+}
+
+async function handleSessionError(ctx: EventHandlerContext, event: PluginEvent): Promise<void> {
+    const sessionID = readSessionID(event.properties);
+    const error = event.properties?.error;
+
+    if (sessionID && isRecord(error) && (error.name === "MessageAbortedError" || error.name === "AbortError")) {
+        // Only a deliberate stop pauses the mission until the user speaks again.
+        MissionLoopHandler.handleAbort(sessionID);
+        markAbort(ctx.sessions, sessionID);
+        PendingInjection.clearPrompts(sessionID);
+        return;
+    }
+    // Any other failure drops a pending continuation; the next idle re-checks the mission.
+    if (sessionID) MissionLoopHandler.handleSessionBusy(sessionID);
+
+    if (sessionID && error) {
+        await SessionRecovery.handleSessionError(ctx.client, sessionID, error);
+    }
+}
+
+async function handleMessageUpdated(ctx: EventHandlerContext, event: PluginEvent): Promise<void> {
+    const messageInfo = readMessageUpdatedInfo(event.properties);
+    const sessionID = messageInfo?.sessionID;
+    if (!sessionID) return;
+
+    // Context usage feeds the compaction advice. Resolving the model's
+    // window can hit the server, so run it off the completion path rather than
+    // making every token-bearing message wait on it.
+    void checkContextUsage(ctx, sessionID, messageInfo).catch((error) => {
+        log(`[event-handler] context usage check failed for ${sessionID}: ${error}`);
+    });
+
+    // The host reports only assistant steps; user input arrives through the prompt hook.
+    if (messageInfo.role === MESSAGE_ROLES.ASSISTANT) {
+        await handleAssistantMessageUpdated(ctx, sessionID, messageInfo);
+    }
+}
+
+function readMessageUpdatedInfo(properties: Record<string, unknown> | undefined): MessageUpdatedInfo | undefined {
+    const info = properties?.info;
+    return isRecord(info) ? info as MessageUpdatedInfo : undefined;
+}
+
+async function checkContextUsage(ctx: EventHandlerContext, sessionID: string, messageInfo: MessageUpdatedInfo): Promise<void> {
+    const totalTokens = readTotalTokens(messageInfo);
+    if (totalTokens <= 0) return;
+
+    // Host step events carry no model; the context hook recorded the session's model.
+    const maxTokens = messageInfo.providerID && messageInfo.modelID
+        ? await ctx.contextLimits.resolve(messageInfo.providerID, messageInfo.modelID)
+        : await ctx.contextLimits.resolveSession(sessionID);
+    ContextMonitor.checkContextWindow(sessionID, totalTokens, maxTokens);
+}
+
+/**
+ * Same arithmetic as upstream's overflow check in `session/overflow.ts`:
+ * cached prompt tokens still occupy the window, so they count; reasoning is
+ * already inside `output` for the providers that report it and would double
+ * count.
+ */
+function readTotalTokens(messageInfo: MessageUpdatedInfo): number {
+    const tokens = messageInfo.tokens;
+    if (!tokens) return 0;
+    if (typeof tokens.total === "number" && tokens.total > 0) return tokens.total;
+
+    return (tokens.input ?? 0) +
+        (tokens.output ?? 0) +
+        (tokens.cache?.read ?? 0) +
+        (tokens.cache?.write ?? 0);
+}
+
+async function handleAssistantMessageUpdated(
+    ctx: EventHandlerContext,
+    sessionID: string,
+    messageInfo: MessageUpdatedInfo,
+): Promise<void> {
+    SessionRecovery.markRecoveryComplete(sessionID);
+    if (!messageInfo.id || !messageInfo.time?.completed) return;
+
+    markAssistantCompleted(ctx.sessions, sessionID);
+    await handleCompletedAssistantMessage(ctx, sessionID, messageInfo.id);
+}
+
+function handleSessionIdle(ctx: EventHandlerContext, event: PluginEvent): void {
+    const sessionID = readSessionID(event.properties);
+    if (sessionID) {
+        SessionActivity.recordSessionStatus(sessionID, SESSION_STATUS.IDLE);
+        scheduleIdleContinuation(ctx, sessionID);
+    }
+}
+
+/**
+ * `session.status` is the push-based busy/idle signal. Feeding it to the
+ * activity tracker is what lets every injection site refuse to prompt a session
+ * that is still working, and lets a pending countdown be dropped the moment the
+ * session picks work back up.
+ */
+function handleSessionStatus(ctx: EventHandlerContext, event: PluginEvent): void {
+    const sessionID = readSessionID(event.properties);
+    if (!sessionID) return;
+
+    const statusType = readSessionStatusType(event.properties);
+    SessionActivity.recordSessionStatus(sessionID, statusType);
+
+    if (statusType === SESSION_STATUS.IDLE) {
+        scheduleIdleContinuation(ctx, sessionID);
+        return;
+    }
+
+    MissionLoopHandler.handleSessionBusy(sessionID);
+}
+
+function readSessionStatusType(properties: Record<string, unknown> | undefined): string | undefined {
+    const status = properties?.status;
+    return isRecord(status) ? readString(status.type) : undefined;
+}
+
+function readSessionID(properties: Record<string, unknown> | undefined): string {
+    const directSessionID = readString(properties?.sessionID);
+    if (directSessionID) return directSessionID;
+
+    const info = properties?.info;
+    if (!isRecord(info)) return "";
+    return readString(info.id) ?? "";
+}
+
+function readString(value: unknown): string | undefined {
+    return typeof value === "string" ? value : undefined;
+}
+
+function markAssistantCompleted(sessions: Map<string, PluginSessionState>, sessionID: string): void {
+    const session = sessions.get(sessionID);
+    if (!session) return;
+
+    session.lastAssistantCompletedAt = Date.now();
+}
+
+/**
+ * A deliberate abort survives late completion events. Only subsequent real
+ * user input clears it in the chat handler.
+ */
+function wasAbortedSinceLastTurn(session: PluginSessionState | undefined): boolean {
+    return session?.lastAbortAt !== undefined;
+}
+
+function shouldContinueAfterIdle(session: PluginSessionState | undefined): boolean {
+    if (!session?.active || !session.lastAssistantCompletedAt) {
+        return false;
+    }
+
+    if (session.lastUserMessageAt && session.lastAssistantCompletedAt < session.lastUserMessageAt) {
+        return false;
+    }
+
+    if (session.lastAbortAt && session.lastAssistantCompletedAt < session.lastAbortAt) {
+        return false;
+    }
+
+    return true;
+}
+
+function markAbort(sessions: Map<string, PluginSessionState>, sessionID: string): void {
+    const session = sessions.get(sessionID);
+    if (session) {
+        session.lastAbortAt = Date.now();
+    }
+    MissionLoopHandler.handleAbort(sessionID);
+}
+
+function scheduleIdleContinuation(ctx: EventHandlerContext, sessionID: string): void {
+    const { sessions } = ctx;
+
+    // Untracked sessions are normally none of our business, except when we are
+    // already holding something for one, such as a queued recovery notice;
+    // skipping it would strand that notice until the TTL sweep discarded it.
+    if (!sessions.has(sessionID) && !PendingInjection.hasPendingPrompts(sessionID)) return;
+
+    // The host publishes both session.status(idle) and session.idle for one
+    // transition; collapse them into a single delayed run per session.
+    const scheduled = scheduledIdleSessions(ctx);
+    if (scheduled.has(sessionID)) return;
+    scheduled.add(sessionID);
+    scheduleDelayedHandler("idle continuation", sessionID, () => {
+        scheduled.delete(sessionID);
+        return runIdleContinuation(ctx, sessionID);
+    });
+}
+
+const idleSchedules = new WeakMap<EventHandlerContext, Set<string>>();
+
+function scheduledIdleSessions(ctx: EventHandlerContext): Set<string> {
+    let scheduled = idleSchedules.get(ctx);
+    if (!scheduled) {
+        scheduled = new Set();
+        idleSchedules.set(ctx, scheduled);
+    }
+    return scheduled;
+}
+
+async function runIdleContinuation(ctx: EventHandlerContext, sessionID: string): Promise<void> {
+    const { client, directory, sessions, children } = ctx;
+    const session = sessions.get(sessionID);
+
+    // A deliberate stop means the user does not want any of this delivered.
+    if (wasAbortedSinceLastTurn(session)) {
+        markAbort(sessions, sessionID);
+        PendingInjection.clearPrompts(sessionID);
+        return;
+    }
+
+    // Deferred prompts go out at the first genuine idle, including an idle the
+    // continuation logic itself declines to act on. `shouldContinueAfterIdle`
+    // requires a completed assistant turn, which a queued notice must not wait for.
+    //
+    // A flush starts a new turn, so mission continuation waits for the next
+    // idle rather than piling on top of it.
+    if (await PendingInjection.flushPrompts(client, sessionID)) {
+        return;
+    }
+
+    if (!shouldContinueAfterIdle(session)) {
+        // Pause the mission, but leave `lastAbortAt` to explicit host aborts:
+        // it is sticky and would discard every later background notice.
+        MissionLoopHandler.handleAbort(sessionID);
+        return;
+    }
+
+    if (isLoopActive(directory, sessionID)) {
+        await MissionLoopHandler.handleMissionIdle({
+            client,
+            directory,
+            tasks: { hasBusyChildren: parentID => children.busyChildren(client, parentID).length > 0 },
+        }, sessionID, sessionID);
+        return;
+    }
+
+}
+
+function scheduleDelayedHandler(label: string, sessionID: string, handler: () => Promise<void>): void {
+    setTimeout(() => {
+        handler().catch(error => {
+            log(`[event-handler] ${label} failed for ${sessionID}: ${error}`);
+        });
+    }, IDLE_CONTINUATION_DELAY_MS);
+}

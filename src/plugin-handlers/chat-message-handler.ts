@@ -1,0 +1,111 @@
+/**
+ * Prompt handler: records user activity on each prompt and runs the chat hooks
+ * (mission commands typed as text).
+ */
+
+import { log } from "../shared/logger.js";
+import { PART_TYPES } from "../shared/index.js";
+import { HookRegistry } from "../hooks/registry.js";
+import { HOOK_ACTIONS } from "../hooks/constants.js";
+import { clearCircuitState } from "../core/loop/circuit-breaker.js";
+import { handleUserMessage } from "../core/loop/mission-loop-handler.js";
+import type { ChatMessageHandlerContext, PluginSessionState } from "./context.js";
+
+interface ChatMessageInput {
+    sessionID: string;
+    agent?: string;
+}
+
+interface ChatMessageOutput {
+    parts: Array<{ type: string; text?: string; synthetic?: boolean }>;
+}
+
+/**
+ * Create chat.message handler
+ */
+export function createChatMessageHandler(ctx: ChatMessageHandlerContext) {
+    const { directory, sessions } = ctx;
+
+    return async (msgInput: ChatMessageInput, msgOutput: ChatMessageOutput) => {
+        const parts = msgOutput.parts;
+        const textPartIndex = parts.findIndex(isTextPartWithText);
+        if (textPartIndex === -1) return;
+
+        const textPart = parts[textPartIndex];
+        if (!isTextPartWithText(textPart)) return;
+
+        const originalText = textPart.text;
+        const sessionID = msgInput.sessionID;
+        const agentName = (msgInput.agent || "").toLowerCase();
+
+        log("[chat-message-handler] hook triggered", { sessionID, agent: agentName, textLength: originalText.length });
+        markUserMessage(sessions, sessionID);
+        if (!isSyntheticPart(textPart)) resetForUserInput(sessions, sessionID);
+        rememberSessionAgent(sessions, sessionID, agentName);
+
+        // Execute Chat Hooks
+        const hooks = HookRegistry.getInstance();
+        const hookContext = {
+            sessionID,
+            agent: agentName || undefined,
+            client: ctx.client,
+            directory,
+            sessions,
+            children: ctx.children,
+        };
+
+        const hookResult = await hooks.executeChat(hookContext, originalText);
+        applyHookResult(parts, textPart, hookResult);
+    };
+}
+
+type ChatMessagePart = ChatMessageOutput["parts"][number];
+type ChatTextPart = ChatMessagePart & { text: string };
+type ChatHookResult = Awaited<ReturnType<HookRegistry["executeChat"]>>;
+
+/**
+ * A real user message is new input; whatever loop the model was stuck
+ * in no longer applies. Orchestrator prompts are synthetic and do not count.
+ */
+function resetForUserInput(sessions: Map<string, PluginSessionState>, sessionID: string): void {
+    clearCircuitState(sessionID);
+    const session = sessions.get(sessionID);
+    if (session) session.lastAbortAt = undefined;
+    handleUserMessage(sessionID);
+}
+
+/**
+ * Remember which agent owns this session so later phases (post-tool,
+ * assistant-done) can attribute work without re-deriving it.
+ */
+function rememberSessionAgent(sessions: Map<string, PluginSessionState>, sessionID: string, agentName: string): void {
+    if (!agentName) return;
+    const session = sessions.get(sessionID);
+    if (session) session.agent = agentName;
+}
+
+function applyHookResult(parts: ChatMessagePart[], textPart: ChatTextPart, hookResult: ChatHookResult): void {
+    if (hookResult.action === HOOK_ACTIONS.INTERCEPT) {
+        parts.splice(0, parts.length);
+        return;
+    }
+
+    if (hookResult.modifiedMessage) {
+        textPart.text = hookResult.modifiedMessage;
+    }
+}
+
+function isTextPartWithText(part: ChatMessagePart): part is ChatTextPart {
+    return part.type === PART_TYPES.TEXT && "text" in part && typeof part.text === "string" && part.text.length > 0;
+}
+
+function isSyntheticPart(part: ChatMessagePart): boolean {
+    return "synthetic" in part && part.synthetic === true;
+}
+
+function markUserMessage(sessions: Map<string, PluginSessionState>, sessionID: string): void {
+    const session = sessions.get(sessionID);
+    if (!session) return;
+
+    session.lastUserMessageAt = Date.now();
+}

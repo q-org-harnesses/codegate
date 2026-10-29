@@ -1,0 +1,113 @@
+/**
+ * Mission evidence store (Builder learning, adoption assessment item C).
+ *
+ * Builder treats a model's "done" as a candidate until the runtime has recorded
+ * enough evidence to close the task (`builder_app/src/plumbing_trace.rs`:
+ * changed files must be traced/verified). Orchestrator is a plugin and cannot
+ * own the per-turn loop, but it DOES own the mission-loop continuation decision.
+ *
+ * This module observes `tool.execute.after` and tracks files changed since
+ * the latest recognized verification command. The file list is advisory;
+ * mission completion follows the TODO, checklist, and sync issue verifier.
+ */
+
+interface SessionEvidence {
+    unverifiedFiles: Set<string>;
+}
+
+const MAX_TRACKED_FILES = 200;
+const store = new Map<string, SessionEvidence>();
+
+/** OpenCode built-in tools that mutate files. */
+const WRITE_TOOLS = new Set(["write", "edit", "patch"]);
+
+/** OpenCode's shell tool, whose command we inspect for verification intent. */
+const SHELL_TOOLS = new Set(["shell"]);
+
+/** A command counts as verification when it runs tests/build/lint/typecheck. */
+const VERIFY_HINT =
+    /\b(test|spec|vitest|jest|pytest|build|tsc|typecheck|lint|eslint|clippy|cargo\s+test|npm\s+test|go\s+test|check|py_compile)\b/i;
+
+const FILE_ARG_KEYS = ["filePath", "filepath", "file_path", "path", "file", "directory", "dir"] as const;
+const FILE_ARRAY_ARG_KEYS = ["files", "filePaths", "file_paths", "paths"] as const;
+
+function ensure(sessionID: string): SessionEvidence {
+    let evidence = store.get(sessionID);
+    if (!evidence) {
+        evidence = { unverifiedFiles: new Set() };
+        store.set(sessionID, evidence);
+    }
+    return evidence;
+}
+
+function collectFileCandidates(args: Record<string, unknown> | undefined): string[] {
+    if (!args || args.dry_run === true || args.dryRun === true) return [];
+
+    const candidates: string[] = [];
+    for (const key of FILE_ARG_KEYS) {
+        const value = args[key];
+        if (typeof value === "string") {
+            candidates.push(value);
+        }
+    }
+
+    for (const key of FILE_ARRAY_ARG_KEYS) {
+        const value = args[key];
+        if (!Array.isArray(value)) continue;
+        for (const item of value) {
+            candidates.push(...collectArrayItemCandidates(item));
+        }
+    }
+
+    return candidates;
+}
+
+/** An array entry is either a path string or a nested argument object (e.g. multi_patch edits). */
+function collectArrayItemCandidates(item: unknown): string[] {
+    if (typeof item === "string") return [item];
+    if (item && typeof item === "object") return collectFileCandidates(item as Record<string, unknown>);
+    return [];
+}
+
+function recordChangedFile(sessionID: string, filePath: string): void {
+    if (!sessionID || !filePath) return;
+    const evidence = ensure(sessionID);
+    if (evidence.unverifiedFiles.size < MAX_TRACKED_FILES) {
+        evidence.unverifiedFiles.add(filePath);
+    }
+}
+
+function recordVerification(sessionID: string): void {
+    if (!sessionID) return;
+    ensure(sessionID).unverifiedFiles.clear();
+}
+
+/** Record evidence from a single observed tool call. */
+export function recordToolEvidence(
+    sessionID: string,
+    tool: string,
+    args: Record<string, unknown> | undefined,
+): void {
+    if (!sessionID || !tool) return;
+    const name = tool.toLowerCase();
+    if (WRITE_TOOLS.has(name)) {
+        for (const candidate of collectFileCandidates(args)) {
+            recordChangedFile(sessionID, candidate);
+        }
+    } else if (SHELL_TOOLS.has(name)) {
+        recordShellEvidence(sessionID, args);
+    }
+}
+
+function recordShellEvidence(sessionID: string, args: Record<string, unknown> | undefined): void {
+    const command = String(args?.command ?? args?.cmd ?? "");
+    if (VERIFY_HINT.test(command)) recordVerification(sessionID);
+}
+
+export function getUnverifiedFiles(sessionID: string): string[] {
+    return Array.from(store.get(sessionID)?.unverifiedFiles ?? []);
+}
+
+export function clearEvidence(sessionID: string): void {
+    store.delete(sessionID);
+}

@@ -1,0 +1,231 @@
+import type { Plugin } from "@opencode/plugin";
+import { registerAllTools } from "../tools/registry.js";
+import { initializePluginRuntime, type PluginRuntime } from "../plugin-runtime.js";
+import { createChatMessageHandler } from "../plugin-handlers/chat-message-handler.js";
+import { createToolExecuteBeforeHandler } from "../plugin-handlers/tool-execute-pre-handler.js";
+import { createToolExecuteAfterHandler } from "../plugin-handlers/tool-execute-handler.js";
+import { createSessionCompactingHandler } from "../plugin-handlers/session-compacting-handler.js";
+import { createMissionContextBuilder } from "../plugin-handlers/mission-context.js";
+import { createEventHandler } from "../plugin-handlers/event-handler.js";
+import { createHostClient } from "./client.js";
+import { startEventBridge } from "./event-bridge.js";
+import { registerTools } from "./tool-adapter.js";
+import { registerCommands } from "./command-adapter.js";
+import { registerAgents } from "./agent-adapter.js";
+import { isRecord } from "../shared/core/guards.js";
+import { truncateOversizedMessageParts } from "../shared/message/message-guard.js";
+
+type Context = Plugin.Context;
+type Registration = Awaited<ReturnType<Context["tool"]["transform"]>>;
+
+export async function setupPlugin(contextInput: unknown): Promise<() => Promise<void>> {
+    const context = contextInput as Context;
+    const bridge = createHostClient(context);
+    const runtime = initializePluginRuntime(
+        { client: bridge.client, directory: context.location.directory },
+        context.options,
+    );
+    const { handlerContext } = runtime;
+    const registrations: Registration[] = [];
+    let stopEvents: (() => void) | undefined;
+    try {
+        await registerHooks(context, runtime, registrations);
+        registrations.push(await registerAgents(context));
+        registrations.push(await registerTools(
+            context,
+            registerAllTools(),
+        ));
+        registrations.push(await registerCommands(context, handlerContext));
+        stopEvents = startEventBridge(
+            context,
+            createEventHandler(handlerContext),
+            bridge.statuses,
+        );
+    } catch (error) {
+        try {
+            await disposePlugin(registrations, stopEvents, runtime.shutdownManager);
+        } catch (cleanupError) {
+            throw new AggregateError([error, cleanupError], "Plugin setup and cleanup failed");
+        }
+        throw error;
+    }
+    return () => disposePlugin(registrations, stopEvents, runtime.shutdownManager);
+}
+
+async function disposePlugin(registrations: Registration[], stopEvents: (() => void) | undefined, shutdownManager: PluginRuntime["shutdownManager"]): Promise<void> {
+    stopEvents?.();
+    const results = await Promise.allSettled(registrations.map(registration =>
+        Promise.resolve().then(() => registration.dispose()),
+    ));
+    await shutdownManager.shutdown();
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failures.length === 1) throw failures[0].reason;
+    if (failures.length > 1) throw new AggregateError(failures.map(failure => failure.reason), "Plugin registration cleanup failed");
+}
+
+async function registerHooks(context: Context, runtime: PluginRuntime, registrations: Registration[]): Promise<void> {
+    const { handlerContext } = runtime;
+    const temperatures = runtime.options.agentTemperatures;
+    const chat = createChatMessageHandler(handlerContext);
+    const before = createToolExecuteBeforeHandler(handlerContext);
+    const after = createToolExecuteAfterHandler(handlerContext, runtime.options.customRendering);
+    const compact = createSessionCompactingHandler(handlerContext);
+    const missionContext = createMissionContextHandler(handlerContext);
+    const { sessions } = handlerContext;
+    const hooks = [
+        () => context.session.hook("prompt", input => runPromptHook(chat, input, sessions)),
+        () => context.session.hook("context", async input => {
+            runContextOptions(input, temperatures, handlerContext.contextLimits);
+            missionContext(input);
+            runMessageGuard(input);
+            rememberContextAgent(sessions, input as ContextRequest);
+        }),
+        () => context.session.hook("compaction", input => runCompactionHook(compact, input)),
+        () => context.tool.hook("execute.before", input => runBeforeToolHook(before, input)),
+        () => context.tool.hook("execute.after", input => runAfterToolHook(after, input)),
+    ];
+    const results = await Promise.allSettled(hooks.map(hook => Promise.resolve().then(hook)));
+    for (const result of results) {
+        if (result.status === "fulfilled") registrations.push(result.value);
+    }
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) throw failure.reason;
+}
+
+type SessionStates = PluginRuntime["handlerContext"]["sessions"];
+
+/**
+ * Prompt hooks carry no agent; only the per-request `context` hook does.
+ * The latest one is kept on the existing session state (which the session's
+ * lifecycle already bounds) so prompt hooks and tool hooks can attribute work.
+ */
+function rememberContextAgent(sessions: SessionStates, request: ContextRequest): void {
+    const session = sessions.get(request.sessionID);
+    const agent = (request.agent || "").toLowerCase();
+    if (session && agent) session.agent = agent;
+}
+
+async function runPromptHook(chat: ReturnType<typeof createChatMessageHandler>, input: unknown, sessions: SessionStates): Promise<void> {
+    const prompt = input as { sessionID: string; prompt: { text: string } };
+    const output = { parts: [{ type: "text", text: prompt.prompt.text }] };
+    // Prompt input carries no agent. The context hook records it, but runs after
+    // this hook, so the value lags one turn (empty on a session's first prompt,
+    // previous agent right after a switch).
+    const agent = sessions.get(prompt.sessionID)?.agent ?? "";
+    await chat({ sessionID: prompt.sessionID, agent }, output);
+    prompt.prompt.text = output.parts[0]?.text ?? "";
+}
+
+function runContextOptions(
+    input: unknown,
+    temperatures: Readonly<Record<string, number>>,
+    contextLimits: PluginRuntime["handlerContext"]["contextLimits"],
+): void {
+    const request = input as ContextRequest;
+    const temperature = Object.hasOwn(temperatures, request.agent) ? temperatures[request.agent] : undefined;
+    if (temperature !== undefined) request.options.temperature = temperature;
+    contextLimits.rememberModel(
+        request.sessionID,
+        request.model.providerID,
+        request.model.id,
+        undefined,
+    );
+}
+
+function createMissionContextHandler(ctx: PluginRuntime["handlerContext"]) {
+    const buildContext = createMissionContextBuilder(ctx);
+    const injected = new WeakSet<object>();
+    return (input: unknown): void => {
+        const request = input as ContextRequest;
+        if (!Array.isArray(request.messages)) return;
+        const previous = request.messages.at(-1);
+        if (previous && injected.has(previous)) request.messages.pop();
+        if (request.messages.length === 0) return;
+        const text = buildContext(request.sessionID);
+        if (!text) return;
+        const message = { role: "user" as const, content: [{ type: "text" as const, text }] };
+        injected.add(message);
+        request.messages.push(message);
+    };
+}
+
+/** Keep a single oversized tool result from blowing the request past the context window. */
+function runMessageGuard(input: unknown): void {
+    const request = input as { messages?: unknown };
+    truncateOversizedMessageParts(request.messages);
+}
+
+type ContextRequest = {
+    sessionID: string;
+    agent: string;
+    model: { providerID: string; id: string };
+    system: Array<{ type: "text"; text: string }>;
+    messages?: unknown[];
+    options: { temperature?: number };
+};
+
+async function runCompactionHook(compact: ReturnType<typeof createSessionCompactingHandler>, input: unknown): Promise<void> {
+    const request = input as { sessionID: string; system: Array<{ type: "text"; text: string }> };
+    const output = { context: [] as string[] };
+    await compact({ sessionID: request.sessionID }, output);
+    request.system.push(...output.context.map(text => ({ type: "text" as const, text })));
+}
+
+async function runBeforeToolHook(before: ReturnType<typeof createToolExecuteBeforeHandler>, input: unknown): Promise<void> {
+    const request = input as { sessionID: string; tool: string; id: string; input: unknown };
+    const output = { args: isRecord(request.input) ? request.input : {} };
+    await before({ sessionID: request.sessionID, tool: request.tool, callID: request.id }, output);
+    request.input = output.args;
+}
+
+async function runAfterToolHook(after: ReturnType<typeof createToolExecuteAfterHandler>, input: unknown): Promise<void> {
+    const request = input as { sessionID: string; tool: string; id: string; input: unknown; status: string; result?: { content?: unknown }; error?: unknown };
+    const original = readResult(request);
+    const output = { title: request.tool, output: original, metadata: {} };
+    await after({ sessionID: request.sessionID, tool: request.tool, callID: request.id, args: request.input }, output);
+    if (request.status === "completed" && request.result) {
+        writeResultContent(request.result, original, output.output);
+    }
+}
+
+function readResult(input: { status: string; result?: unknown; error?: unknown }): string {
+    const value = input.status === "completed" ? input.result : input.error;
+    if (input.status === "completed" && isRecord(value) && typeof value.content === "string") {
+        return value.content;
+    }
+    if (input.status === "completed" && isRecord(value) && Array.isArray(value.content)) {
+        return value.content.filter(isTextContent).map(part => part.text).join("\n");
+    }
+    if (typeof value === "string") return value;
+    return JSON.stringify(value ?? "");
+}
+
+function writeResultContent(result: { content?: unknown }, original: string, updated: string): void {
+    if (updated === original) return;
+    const content = result.content;
+    if (!Array.isArray(content)) {
+        result.content = updated;
+        return;
+    }
+    const parts: readonly unknown[] = content;
+    const textIndices = parts.flatMap((part, index) => isTextContent(part) ? [index] : []);
+    const lastTextIndex = textIndices.at(-1);
+    if (lastTextIndex === undefined) {
+        result.content = [...parts, { type: "text", text: updated }];
+        return;
+    }
+    if (updated.startsWith(original)) {
+        result.content = parts.map((part, index) => index === lastTextIndex && isTextContent(part)
+            ? { ...part, text: part.text + updated.slice(original.length) }
+            : part);
+        return;
+    }
+    const firstTextIndex = textIndices[0];
+    result.content = parts.flatMap((part, index) => !isTextContent(part)
+        ? [part]
+        : index === firstTextIndex ? [{ ...part, text: updated }] : []);
+}
+
+function isTextContent(value: unknown): value is { type: "text"; text: string } {
+    return isRecord(value) && value.type === "text" && typeof value.text === "string";
+}

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/orchestrator-cli"]
+
+[workspace.package]
+version = "2.0.21"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/agnusdei1207/opencode-orchestrator"
+authors = ["agnusdei1207"]
+
+[workspace.dependencies]
+anyhow = "1.0"
+tempfile = "3.15"
+
+# Release builds favor runtime speed and a small binary. panic stays the
+# default (unwind): the shell listener recovers a poisoned mutex rather than
+# aborting the process.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
