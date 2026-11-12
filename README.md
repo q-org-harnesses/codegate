@@ -10,7 +10,7 @@ The code is published for anyone to read, use and fork under the MIT license. It
 
 ## Credit
 
-- **CodeGate is a fork of [opencode-orchestrator](https://github.com/agnusdei1207/opencode-orchestrator) by agnusdei1207** (MIT), taken at upstream version 2.0.21 (commit `85fd256`). The mission loop, the four agent presets (Commander, Planner, Worker, Reviewer) and the `update_todo` tool are theirs. The upstream commit is kept as this repository's first commit, and the original README is in `README.upstream.md`.
+- **CodeGate is a fork of [opencode-orchestrator](https://github.com/agnusdei1207/opencode-orchestrator) by agnusdei1207** (MIT), taken at upstream version 2.0.21 (commit `85fd256`). The mission loop, the four agent presets (Commander, Planner, Worker, Reviewer) and the `update_todo` tool are theirs. The upstream snapshot (author preserved) is this repository's first commit, minus upstream's `.github` folder (its CI publishes to npm and is not meant for a fork); the original README is in `README.upstream.md`.
 - **Gate checking uses [unlazy](https://github.com/Leonxlnx/unlazy) by Leonxlnx** (MIT): `gate-check.mjs` and `gate-lint.mjs` run and verify the gates. CodeGate calls unlazy and never edits it.
 - **The CodeGate changes were written by Claude Sonnet 5.5 (Anthropic)**, working with a human owner, and are in the second commit.
 
