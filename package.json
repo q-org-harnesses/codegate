@@ -1,16 +1,12 @@
 {
-  "name": "opencode-orchestrator",
-  "description": "Mission continuity for OpenCode: an OpenCode 2 plugin that keeps a task and its unfinished work connected across turns until it is verified.",
+  "name": "codegate",
+  "description": "Gate-enforced completion for OpenCode 2: a fork of opencode-orchestrator that ends a mission only when approved, re-executed acceptance gates pass.",
   "version": "2.0.21",
-  "author": "agnusdei1207",
+  "author": "agnusdei1207 (upstream); CodeGate changes by Claude Sonnet 5.5 (Anthropic)",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/agnusdei1207/opencode-orchestrator.git"
-  },
-  "homepage": "https://agnusdei1207.github.io/opencode-orchestrator/",
-  "bugs": {
-    "url": "https://github.com/agnusdei1207/opencode-orchestrator/issues"
+    "url": "git+https://github.com/q-org-harnesses/codegate.git"
   },
   "keywords": [
     "opencode",

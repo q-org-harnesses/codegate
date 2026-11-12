@@ -4,6 +4,7 @@ import { MissionControlHook } from "./features/mission-loop.js";
 import { StrictRoleGuardHook } from "./custom/strict-role-guard.js";
 import { SecretScannerHook } from "./custom/secret-scanner.js";
 import { ResourceControlHook } from "./custom/resource-control.js";
+import { GateGuardHook } from "./custom/gate-guard.js";
 
 let initialized = false;
 
@@ -26,6 +27,7 @@ export function initializeHooks() {
     registry.registerChat(missionControl, "stop");
 
     registry.registerPreTool(roleGuard, "stop");
+    registry.registerPreTool(new GateGuardHook(), "stop");
 
     registry.registerPostTool(secretScanner, "stop");
     registry.registerPostTool(resourceControl, "continue", true);

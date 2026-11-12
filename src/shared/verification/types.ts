@@ -43,4 +43,6 @@ export interface VerificationResult {
     checklistPresent: boolean;
     checklistProgress: string;
     errors: string[];
+    /** CodeGate: the gate ledger exists but the Owner has not approved its commands yet; the loop must wait, not nag. */
+    awaitingApproval?: boolean;
 }

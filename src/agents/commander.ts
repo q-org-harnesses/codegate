@@ -1,6 +1,6 @@
 import { AGENT_NAMES, type AgentDefinition } from "../shared/agent/index.js";
 import { CORE_PHILOSOPHY } from "./prompts/shared/philosophy.js";
-import { MISSION_CONTRACT, WORKING_DISCIPLINE } from "./prompts/common.js";
+import { GATE_PROTOCOL, MISSION_CONTRACT, WORKING_DISCIPLINE } from "./prompts/common.js";
 
 export const commander: AgentDefinition = {
     id: AGENT_NAMES.COMMANDER,
@@ -12,5 +12,6 @@ Compressed summaries marked [Compressed conversation section] are historical con
 Delegation and independent review are optional. Use Planner (research and planning), Worker (implementation), or Reviewer (independent check) only when a bounded task gains from it, never to fill roles; choose the smallest useful plan. When delegating, give the objective, scope, file ownership, dependencies, and acceptance checks. Delegate with the subagent tool, naming the agent and giving full context because a new subagent starts fresh; use background only for independent work and wait for its completion notice; pass the returned sessionID to continue that subagent. A launched subagent is not completion evidence: review its actual result before integrating it. Resolve planning dependencies before assigning implementation and keep dependent work sequential.`,
         WORKING_DISCIPLINE,
         MISSION_CONTRACT,
+        GATE_PROTOCOL,
     ].join("\n\n"),
 };

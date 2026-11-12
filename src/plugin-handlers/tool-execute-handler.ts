@@ -9,6 +9,7 @@
 
 import { log } from "../shared/logger.js";
 import { recordToolEvidence } from "../core/loop/evidence.js";
+import { recordSubagentRun } from "../core/loop/subagent-runs.js";
 import { formatElapsedTime, formatTimestamp } from "../utils/formatting/index.js";
 import { HookRegistry } from "../hooks/registry.js";
 import type { PluginSessionState, ToolExecuteHandlerContext } from "./context.js";
@@ -37,6 +38,14 @@ export function createToolExecuteAfterHandler(ctx: ToolExecuteHandlerContext, cu
         toolInput: ToolExecuteAfterInput,
         toolOutput: ToolExecuteAfterOutput
     ) => {
+        // Record every native subagent call, mission or not: gates use it to prove a reviewer ran.
+        recordSubagentRun(directory, {
+            sessionID: toolInput.sessionID,
+            callID: toolInput.callID,
+            tool: toolInput.tool,
+            args: toolInput.args,
+            output: typeof toolOutput?.output === "string" ? toolOutput.output : "",
+        });
         const session = sessions.get(toolInput.sessionID);
         const missionActive = session?.active === true;
         const toolArguments = readToolArgs(toolInput.args);

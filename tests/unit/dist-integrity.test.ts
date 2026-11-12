@@ -128,7 +128,7 @@ describe.skipIf(!existsSync(path.join(distDir, "index.js")))("dist bundle integr
     }, DIST_ENTRYPOINT_LOAD_TIMEOUT_MS);
 
     it("resolves the package root export to the bundled entrypoint", async () => {
-        const rootEntry = import.meta.resolve("opencode-orchestrator");
+        const rootEntry = import.meta.resolve("codegate");
         const mod = await import(rootEntry);
 
         expect(rootEntry.replaceAll("\\", "/")).toContain("/dist/index.js");

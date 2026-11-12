@@ -23,7 +23,8 @@ import { LOOP, MISSION_CONTROL, type VerificationResult } from "../../shared/ind
 import { sendNotification } from "../notification/os-notify/notifier.js";
 import { playSound } from "../notification/os-notify/sound-player.js";
 import { detectPlatform, getDefaultSoundPath } from "../notification/os-notify/platform.js";
-import { verifyMissionCompletion, buildVerificationSummary } from "./verification.js";
+import { buildVerificationSummary } from "./verification.js";
+import { verifyMissionWithGates } from "./gates.js";
 import { syncMissionMemory } from "../knowledge/mission-memory.js";
 import { appendMissionLedgerEvent } from "./mission-ledger.js";
 import { createSessionStateStore, type SessionState } from "./session-state-store.js";
@@ -145,9 +146,13 @@ async function injectContinuation(request: ContinuationInjectionRequest): Promis
     }
     if (!isInjectionCurrent(request, state)) return;
 
-    const verification = verifyMissionCompletion(directory);
+    const verification = await verifyMissionWithGates(directory);
     if (verification.passed) {
         await handleMissionComplete(directory, loopState);
+        return;
+    }
+    if (verification.awaitingApproval) {
+        log("[mission-loop-handler] Gates await the Owner's approval; no continuation injected", { sessionID });
         return;
     }
     await sendContinuationPrompt(request, prepareContinuationPrompt(request, verification));
@@ -360,10 +365,14 @@ export async function handleMissionIdle(
     if (!isIdleCheckCurrent(state, directory, loopState)) return;
     if (hasRunningBackgroundTasks(tasks, sessionID)) return;
 
-    const verification = verifyMissionCompletion(directory);
+    const verification = await verifyMissionWithGates(directory);
     if (verification.passed) {
         log(`[${MISSION_CONTROL.LOG_SOURCE}-handler] Verification passed for ${sessionID}. Completion confirmed.`);
         await handleMissionComplete(directory, loopState);
+        return;
+    }
+    if (verification.awaitingApproval) {
+        log(`[${MISSION_CONTROL.LOG_SOURCE}-handler] Gates await the Owner's approval for ${sessionID}; waiting`);
         return;
     }
 

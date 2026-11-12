@@ -2,6 +2,11 @@ import { describe, it, expect } from "vitest";
 import { COMMANDS } from "../../src/tools/slashCommand.js";
 
 describe("slash COMMANDS", () => {
+    it("starts the /task mission with [no-start] so the agent skips its Session Start", () => {
+        expect(COMMANDS.task.template.startsWith("[no-start]")).toBe(true);
+        expect(COMMANDS.task.template).toContain("$ARGUMENTS");
+    });
+
     it("keeps mission execution proportional and uses the retained completion schema", () => {
         const template = COMMANDS.task.template;
         expect(template).toContain("Handle small work directly");

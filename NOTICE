@@ -1,0 +1,8 @@
+CodeGate is a fork of opencode-orchestrator 2.0.21 (commit 85fd256)
+Copyright (c) 2026 agnusdei1207, MIT License: https://github.com/agnusdei1207/opencode-orchestrator
+
+Gate verification calls unlazy 2.x (scripts/gate-check.mjs, scripts/gate-lint.mjs)
+Copyright (c) 2026 Leonxlnx, MIT License: https://github.com/Leonxlnx/unlazy
+CodeGate calls unlazy and does not include or modify it.
+
+The CodeGate changes were written by Claude Sonnet 5.5 (Anthropic) and are published under the MIT License.

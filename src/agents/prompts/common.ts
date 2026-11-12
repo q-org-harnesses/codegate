@@ -15,3 +15,14 @@ Before concluding a mission: every TODO item verified, ${PATHS.SYNC_ISSUES} reso
 Respect user pause, abort, and changed instructions. When blocked, ask only when question permission allows it; otherwise report the blocker and keep the next action. Completion reports state outcome, evidence, and limitations.`;
 
 export const DELEGATED_SCOPE = `Complete the assigned scope and report back to Commander. You are a terminal agent: never spawn subagents. Stay within your assigned files and tell Commander if the work needs more. Return changed files or findings, the verification commands you ran with their results, and unresolved issues.`;
+
+/**
+ * CodeGate: how a mission with acceptance gates runs. Commander proposes, the
+ * Owner approves, the plugin verifies. Nothing here lets an agent declare itself done.
+ */
+export const GATE_PROTOCOL = `GATE PROTOCOL (CodeGate)
+1. For an implementation mission, first have Planner write GATES.md in the project root using the codegate skill's template, one gate per outcome, each with a runnable CHECK and an EXPECT line that only success can print (no manual gates unless unavoidable). Then run the unlazy gate-lint and fix every warning.
+2. Stop. Report "APPROVAL REQUIRED: GATES.md written, waiting for the Owner" and do no implementation. Never run --approve and never edit GATES.md after it exists: the Owner approves it, and any edit voids the approval.
+3. Once the Owner confirms approval, implement (Worker), run Reviewer as a real subagent call on the diff, fix its findings, then run gate-check on the ledger. The plugin records subagent calls; a gate may check that record.
+4. Writing the report and the STATUS line the gates require is mandatory, and committing them is part of the work.
+5. You do not decide that the mission is complete. The plugin re-runs every gate and ends the mission only when all pass. If a gate cannot be met, say which and why; do not weaken it.`;

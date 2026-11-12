@@ -1,6 +1,7 @@
 import { AGENT_NAMES } from "../shared/index.js";
 
-const MISSION_MODE_TEMPLATE = `<mission>
+const MISSION_MODE_TEMPLATE = `[no-start]
+<mission>
 <task>
 $ARGUMENTS
 </task>
