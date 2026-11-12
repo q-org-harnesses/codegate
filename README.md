@@ -51,4 +51,4 @@ node --test skill/codegate/tests # skill
 
 ## License
 
-MIT. The original copyright of agnusdei1207 is kept in `LICENSE`; the changes are published under the same license.
+MIT. The original license and copyright of agnusdei1207 are kept in `LICENSE` unchanged; the changes are published under the same license (see `NOTICE`).
