@@ -12,7 +12,8 @@ const log = (m) => { try { mkdirSync(join(skillDir, "logs"), { recursive: true }
 const help = `usage (skill): new-ledger.mjs --kind skill --task ID --skill-dir DIR --tests CMD [--repo DIR] [--skills-subdir DIR] [--tests-expect REGEX] [--done-cmd CMD --done-expect TEXT] [--status-re REGEX] [--date YYYY-MM-DD] [--out GATES.md]
   Renders templates/gates-skill.md: skill-lint, tests, trial log, reviewer ran, report and commit gates for building a skill (20i, 20i1).
 usage: new-ledger.mjs --task ID --tests CMD --allow REGEX  (--run-cmd CMD --run-expect TEXT | --serve CMD --cwd DIR --port N --probes NAME=PATH=CODE,...)
-  [--tests-expect REGEX] [--owns TEXT] [--base REF] [--review-file PATH] [--report-file PATH] [--date YYYY-MM-DD] [--out GATES.md] [--help]
+  [--tests-expect REGEX] [--owns TEXT] [--base REF] [--pairing-cmd CMD] [--names-cmd CMD] [--pass-cmd CMD] [--review-file PATH] [--report-file PATH] [--date YYYY-MM-DD] [--out GATES.md] [--help]
+Repo-rule gates (optional, each adds one gate that passes only when CMD exits 0): --pairing-cmd (every source file has a paired test), --names-cmd (file names follow the naming rule), --pass-cmd (a unit-test PASS is recorded for HEAD before any Heroku push).
 Writes the ledger (refuses to overwrite) and runs gate-lint. Exit 0 = rendered and LINT OK; non-zero = stop and report.`;
 
 const argv = process.argv.slice(2);
@@ -26,6 +27,19 @@ function extra(a, repo) {
   if (a["status-re"]) {
     gate("The STATUS line is in the HEAD commit", `git -C ${repo} show HEAD -- migration/STATUS.md | rg -c "^\\+${a["status-re"]}"`, "1");
     gate("STATUS.md has no uncommitted change", `echo "dirty=$(git -C ${repo} status --short migration/STATUS.md | wc -l | tr -d " ")"`, "dirty=0");
+  }
+  return out;
+}
+// Optional repo-rule gates for code ledgers: each command must exit 0. Commands sit inside bash -c '...', so no single quotes.
+function ruleGates(a, start) {
+  const rules = [["pairing-cmd", "pairing_rc", "Every source file has a paired test file (pairing check passes)"],
+    ["names-cmd", "names_rc", "File names follow the naming rule (names check passes)"],
+    ["pass-cmd", "pass_rc", "A unit-test PASS is recorded for HEAD (required before any Heroku push)"]];
+  let n = start, out = "";
+  for (const [flag, tag, title] of rules) {
+    if (!a[flag]) continue;
+    if (/'/.test(a[flag])) { console.error(`--${flag} must not contain single quotes; use double quotes`); process.exit(2); }
+    out += `\n- [ ] G${n++}: ${title}\n  CHECK: bash -c '${a[flag]} >/dev/null 2>&1; echo ${tag}=$?'\n  EXPECT: ${tag}=0\n  EVIDENCE: pending\n`;
   }
   return out;
 }
@@ -81,6 +95,7 @@ const out = resolve(a.out ?? "GATES.md");
 if (existsSync(out)) { console.error(`${out} already exists: it is frozen. Ask the Owner to change it.`); log(`refused overwrite ${out}`); process.exit(3); }
 let text = readFileSync(join(skillDir, "templates", "gates-task.md"), "utf8");
 text = text.replace(/\{\{([A-Z_]+)\}\}/g, (_, k) => { if (!(k in vars)) throw new Error(`unknown placeholder ${k}`); return vars[k]; });
+text = text.replace(/\s*$/, "\n") + ruleGates(a, 7);
 writeFileSync(out, text);
 log(`rendered ${out} for ${a.task}`);
 const unlazy = process.env.CODEGATE_UNLAZY_DIR ?? join(homedir(), ".config/opencode/skills/unlazy");

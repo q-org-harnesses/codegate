@@ -121,3 +121,43 @@ test("code-mode ledger whose allow regex starts with an escaped dot still lints 
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(readFileSync(out, "utf8"), /^OWNS: \.github\//m);
 });
+
+test("skill-lint --rules fails a skill that omits the repo rules and passes one that states them", () => {
+  const plain = run(LINT, [mk(), "--rules"]);
+  assert.equal(plain.status, 1);
+  assert.match(plain.stdout, /FAIL L13-repo-rules.*paired test/);
+  const rules = GOOD + "\n## Repo rules\n- Every source file has a paired test.\n- No Heroku push without a PASS.\n- At most one period in a file name.\n";
+  const ok = run(LINT, [mk({ skill: rules }), "--rules"]);
+  assert.match(ok.stdout, /PASS L13-repo-rules/);
+  assert.equal(ok.status, 0, ok.stdout);
+});
+
+test("skill-lint without --rules does not run the repo-rules check", () => {
+  assert.doesNotMatch(run(LINT, [mk()]).stdout, /L13-repo-rules/);
+});
+
+test("code-mode ledger gains pairing, names and PASS gates when their commands are given", () => {
+  const dir = mkdtempSync(join(tmpdir(), "led-"));
+  const out = join(dir, "GATES.md");
+  const r = run(LEDGER, ["--task", "T2", "--tests", "echo t", "--run-cmd", "echo r", "--run-expect", "r", "--allow", "src/", "--out", out,
+    "--pairing-cmd", "python3 -I pairing.py .", "--names-cmd", "python3 -I names.py .", "--pass-cmd", "python3 -I pass_gate.py verify HEAD"]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const text = readFileSync(out, "utf8");
+  assert.equal((text.match(/^- \[ \] G\d/gm) || []).length, 9);
+  for (const tag of ["pairing_rc=0", "names_rc=0", "pass_rc=0"]) assert.ok(text.includes(`EXPECT: ${tag}`), tag);
+});
+
+test("code-mode ledger without repo-rule commands keeps its six gates", () => {
+  const dir = mkdtempSync(join(tmpdir(), "led-"));
+  const out = join(dir, "GATES.md");
+  const r = run(LEDGER, ["--task", "T3", "--tests", "echo t", "--run-cmd", "echo r", "--run-expect", "r", "--allow", "src/", "--out", out]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal((readFileSync(out, "utf8").match(/^- \[ \] G\d/gm) || []).length, 6);
+});
+
+test("a repo-rule command with a single quote is refused", () => {
+  const dir = mkdtempSync(join(tmpdir(), "led-"));
+  const r = run(LEDGER, ["--task", "T4", "--tests", "echo t", "--run-cmd", "echo r", "--run-expect", "r", "--allow", "src/", "--out", join(dir, "GATES.md"), "--pairing-cmd", "echo 'x'"]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /single quotes/);
+});

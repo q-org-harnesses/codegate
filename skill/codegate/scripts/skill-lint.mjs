@@ -6,10 +6,10 @@ import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { basename, extname, join, resolve } from "node:path";
 
-const help = `usage: skill-lint.mjs SKILL_DIR [--no-help-run]
+const help = `usage: skill-lint.mjs SKILL_DIR [--no-help-run] [--rules]
 Checks: name/dir match, name format, SKILL.md frontmatter, description (what + when, <= 1024), < 500 lines,
 house fields (license, compatibility, metadata.version), numbered procedure, no \$(...) in command examples,
-reference links exist, no secrets, every script answers --help, a test exists for scripts, trial log present.`;
+reference links exist, no secrets, with --rules: the SKILL.md states the repo rules (paired tests, PASS before Heroku push, one period in file names), every script answers --help, a test exists for scripts, trial log present.`;
 const args = process.argv.slice(2);
 if (!args.length || args.includes("--help") || args.includes("-h")) { console.log(help); process.exit(args.length ? 0 : 2); }
 const dir = resolve(args.find((a) => !a.startsWith("--")));
@@ -87,6 +87,13 @@ check("L11-tests-exist", !scripts.length || testFiles.length > 0, scripts.length
 const logsDir = join(dir, "logs");
 const logFiles = existsSync(logsDir) ? readdirSync(logsDir).filter((f) => statSync(join(logsDir, f)).size > 0) : [];
 check("L12-trial-log", logFiles.length > 0, logFiles.length ? `logs/: ${logFiles.slice(0, 4).join(", ")}` : "logs/ is missing or empty (no trial evidence)");
+
+// --rules: the repo's protocols must be stated in the skill, so an agent that loads it sees them.
+if (args.includes("--rules")) {
+  const missingRules = [["paired test", /paired test/i], ["PASS before a Heroku push", /Heroku[^\n]*PASS|PASS[^\n]*Heroku/i], ["one period in file names", /one period/i]]
+    .filter(([, rx]) => !rx.test(src)).map(([n]) => n);
+  check("L13-repo-rules", missingRules.length === 0, missingRules.length ? `SKILL.md does not state: ${missingRules.join("; ")}` : "paired tests, PASS before Heroku push and one period are all stated");
+}
 
 done();
 function done() {

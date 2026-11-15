@@ -41,6 +41,8 @@ Use this instead of the code procedure above when the mission is a skill under `
 4. Put the fresh-session trial in `logs/trial.md`, the raw reviewer output in `logs/code_review_raw.md` and the build report as build_report.md in the skill's references folder.
 5. Commit only `skills/<name>/` in `~/.config/opencode`, then run `gate-check` on `GATES.md`.
 
+**Repo rules (optional).** A code ledger can add gates for a repo's protocols: `--pairing-cmd` (every source file has a paired test), `--names-cmd` (file names follow the naming rule) and `--pass-cmd` (a unit-test PASS is recorded for HEAD, required before any Heroku push). Each adds one gate that passes only when its command exits 0. `skill-lint.mjs <skill dir> --rules` also checks that a skill's `SKILL.md` states those three rules.
+
 `skill-lint` checks the mechanical rules only (names, frontmatter, length, numbered steps, no `$(` in examples, links, secrets, `--help`, tests, trial log). It cannot judge whether the skill is any good: the reviewer and the Owner's trial do that.
 
 ## Verification
